@@ -11,14 +11,6 @@
 #include <unistd.h>
 #include "sdr.h"
 
-// Wisdom Defines for the FFTW and FFTWF libraries
-// Options for WISDOM_MODE from least to most rigorous are FFTW_ESTIMATE, FFTW_MEASURE, FFTW_PATIENT, and FFTW_EXHAUSTIVE
-// The FFTW_ESTIMATE mode seems to make completely incorrect Wisdom plan choices sometimes, and is not recommended.
-// Wisdom plans found in an existing Wisdom file will negate the need for time consuming Wisdom plan calculations
-// if the Wisdom plans in the file were generated at the same or more rigorous level.
-#define WISDOM_MODE FFTW_MEASURE
-#define PLANTIME -1		// spend no more than plantime seconds finding the best FFT algorithm. -1 turns the platime cap off.
-char wisdom_file_f[] = "/home/pi/sbitx/data/sbitx_wisdom_f.wis";  // Moved to default data directory - N3SB
 
 // Modified Bessel function of the 0th kind, used by the Kaiser window
 const float i0(float const z){
@@ -83,6 +75,13 @@ int make_hann_window(float *window, int max_count){
 		window[i] = hann(i, max_count);	 
 }
 
+
+  fftwf_plan fwd_filter_plan;
+  fftwf_plan rev_filter_plan;
+
+  static complex float *buffer=NULL;
+  static int LastN=0;
+
 // Apply Kaiser window to filter frequency response
 // "response" is SIMD-aligned array of N complex floats
 // Impulse response will be limited to first M samples in the time domain
@@ -94,23 +93,21 @@ int window_filter(int const L,int const M,complex float * const response,float c
   int const N = L + M - 1;
 
   // fftw_plan can overwrite its buffers, so we're forced to make a temp. Ugh.
-  complex float * const buffer = fftwf_alloc_complex(N);
+ // Just iin case here is a size change
+  if((LastN < N) && (buffer != NULL)) {fftw_free(buffer); buffer = NULL; LastN=N;}
+  if(buffer == NULL){
+  buffer = fftwf_alloc_complex(N);
 
-  fftw_set_timelimit(PLANTIME);
-  fftwf_set_timelimit(PLANTIME);
-  int e = fftwf_import_wisdom_from_filename(wisdom_file_f);
-  if (e == 0)
-  {
-    printf("Generating Wisdom File...\n");
+  fwd_filter_plan = fftwf_plan_dft_1d(N,buffer,buffer,FFTW_FORWARD, WISDOM_MODE); // Was FFTW_ESTIMATE N3SB
+  rev_filter_plan = fftwf_plan_dft_1d(N,buffer,buffer,FFTW_BACKWARD, WISDOM_MODE); // Was FFTW_ESTIMATE N3SB
+#ifdef GEN_WISDOM
+  fftw_export_wisdom_to_filename(wisdom_file);
+printf("GEN4\n");
+#endif
   }
-  fftwf_plan fwd_filter_plan = fftwf_plan_dft_1d(N,buffer,buffer,FFTW_FORWARD, WISDOM_MODE); // Was FFTW_ESTIMATE N3SB
-  fftwf_plan rev_filter_plan = fftwf_plan_dft_1d(N,buffer,buffer,FFTW_BACKWARD, WISDOM_MODE); // Was FFTW_ESTIMATE N3SB
-  fftwf_export_wisdom_to_filename(wisdom_file_f);
-
   // Convert to time domain
   memcpy(buffer,response,N*sizeof(*buffer));
   fftwf_execute(rev_filter_plan);
-  fftwf_destroy_plan(rev_filter_plan);
 
   float kaiser_window[M];
   make_kaiser(kaiser_window,M,beta);
@@ -129,8 +126,13 @@ int window_filter(int const L,int const M,complex float * const response,float c
   float const gain = 1.;
 
 	//shift the buffer to make it causal
-  for(int n = M - 1; n >= 0; n--)
-    buffer[n] = buffer[ (n-M/2+N) % N];
+   int MM=N-M/2;
+  for(int n = M - 1; n >= 0; n--){
+	int k=n+MM;
+	buffer[n]=buffer[(k>=N)?(k-N):k];
+     // avoid % operator - aa2ay
+    //buffer[n] = buffer[ (n-M/2+N) % N];
+  }
 
 #if 0
   printf("#Filter time impulse response, shifted\n");
@@ -158,7 +160,6 @@ int window_filter(int const L,int const M,complex float * const response,float c
   
   // Now back to frequency domain
   fftwf_execute(fwd_filter_plan);
-  fftwf_destroy_plan(fwd_filter_plan);
 
 #if 0       // Prints current filter shape in Frequency Domain
   printf("#Filter Frequency response amplitude\n");
@@ -176,7 +177,6 @@ int window_filter(int const L,int const M,complex float * const response,float c
   }
 #endif
 
-  fftwf_free(buffer);
   return 0;
 }
 
@@ -196,6 +196,7 @@ int filter_tune(struct filter *f, float const low,float const high,float const k
   if(isnan(low) || isnan(high) || isnan(kaiser_beta))
     return -1;
 
+	//printf("filter set from %g to %g\n", low, high);
   //assert(fabs(low) <= 0.5);
   //assert(fabs(high) <= 0.5);
 
