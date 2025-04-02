@@ -1,2 +1,1 @@
-# zbitx.aa2ay
-performance optimized zbitx
+This is the initial commit for zbitx dev
